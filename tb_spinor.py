@@ -1,4 +1,5 @@
 import numpy as np
+from numba import njit, prange
 import copy
 from pythtb import tb_model
 
@@ -6,25 +7,25 @@ from pythtb import tb_model
 def _as_unitary(u, tol=1e-8):
     u = np.asarray(u, dtype=complex)
     if u.shape != (2, 2):
-        raise valueerror(f"u must have shape (2,2), got {u.shape}")
+        raise ValueError(f"u must have shape (2,2), got {u.shape}")
     err = np.max(np.abs(u.conj().T @ u - np.eye(2, dtype=complex)))
     if err > tol:
-        raise valueerror(f"u not unitary: max ||u†u - I|| = {err}")
+        raise ValueError(f"u not unitary: max ||u†u - I|| = {err}")
     return u
 
-
-def _check_compatible_spinless_models(tb_a, tb_b, tol=1e-8):
+# FIXME: Low tolerance by Wannier centers.
+def _check_compatible_spinless_models(tb_a, tb_b, tol=1e-2):
     if tb_a._nspin != 1 or tb_b._nspin != 1:
-        raise valueerror("expected both inputs to have nspin=1 (spinless).")
+        raise ValueError("expected both inputs to have nspin=1 (spinless).")
 
     for attr in ["_dim_k", "_dim_r", "_norb", "_per"]:
         if getattr(tb_a, attr) != getattr(tb_b, attr):
-            raise valueerror(f"models not compatible: tb_a.{attr} != tb_b.{attr}")
+            raise ValueError(f"models not compatible: tb_a.{attr} != tb_b.{attr}")
 
     if np.max(np.abs(tb_a._lat - tb_b._lat)) > tol:
-        raise valueerror("lattice vectors differ between tb models.")
+        raise ValueError("lattice vectors differ between tb models.")
     if np.max(np.abs(tb_a._orb - tb_b._orb)) > tol:
-        raise valueerror("orbital positions differ between tb models.")
+        raise ValueError("orbital positions differ between tb models.")
 
     # hopping connectivity check by keys (i,j,r)
     def hop_key(h, tb):
@@ -38,7 +39,7 @@ def _check_compatible_spinless_models(tb_a, tb_b, tol=1e-8):
     keys_a = [hop_key(h, tb_a) for h in tb_a._hoppings]
     keys_b = [hop_key(h, tb_b) for h in tb_b._hoppings]
     if sorted(keys_a) != sorted(keys_b):
-        raise valueerror("hopping connectivity differs between tb_up and tb_dn.")
+        raise ValueError("hopping connectivity differs between tb_up and tb_dn.")
 
 
 def build_spinful_from_collinear(tb_up, tb_dn, fermi_level=0.0):
@@ -95,6 +96,93 @@ def build_spinful_from_collinear(tb_up, tb_dn, fermi_level=0.0):
 
     return tb_spin
 
+def build_spinful_from_collinear_intersection(tb_up, tb_dn, fermi_level=0.0):
+    """
+    builds nspin=2 spinor model with diagonal spin blocks:
+      onsite: [[e_up,0],[0,e_dn]]
+      hop:    [[t_up,0],[0,t_dn]]
+
+    Uses ONLY the INTERSECTION of hopping keys (i,j,R) present in both tb_up and tb_dn.
+    Hoppings not present in both are excluded.
+    """
+    # --- geometry compatibility (but DO NOT check hopping connectivity equality) ---
+    if tb_up._nspin != 1 or tb_dn._nspin != 1:
+        raise ValueError("expected both inputs to have nspin=1 (spinless).")
+
+    for attr in ["_dim_k", "_dim_r", "_norb", "_per"]:
+        if getattr(tb_up, attr) != getattr(tb_dn, attr):
+            raise ValueError(f"models not compatible: tb_a.{attr} != tb_b.{attr}")
+
+    # lattice vectors and orbital positions must match for this approach
+    tol = 1e-2 # FIXME
+    if np.max(np.abs(tb_up._lat - tb_dn._lat)) > tol:
+        raise ValueError("lattice vectors differ between tb models.")
+    if np.max(np.abs(tb_up._orb - tb_dn._orb)) > tol:
+        raise ValueError("orbital positions differ between tb models.")
+
+    dim_k = tb_up._dim_k
+    dim_r = tb_up._dim_r
+    lat = tb_up.get_lat()
+    orb = tb_up.get_orb()
+    per = copy.deepcopy(tb_up._per)
+    norb = tb_up.get_num_orbitals()
+
+    tb_spin = tb_model(dim_k, dim_r, lat=lat, orb=orb, per=per, nspin=2)
+
+    # --- onsite ---
+    onsite = []
+    for i in range(norb):
+        e_up = tb_up._site_energies[i] - fermi_level
+        e_dn = tb_dn._site_energies[i] - fermi_level
+        onsite.append(
+            np.array([[complex(e_up), 0.0],
+                      [0.0, complex(e_dn)]], dtype=complex)
+        )
+    tb_spin.set_onsite(onsite)
+
+    # --- hopping maps ---
+    def hop_key(h, tb):
+        i = int(h[1])
+        j = int(h[2])
+        if tb._dim_k == 0:
+            return (i, j)
+        r = np.array(h[3], dtype=int)
+        return (i, j, tuple(r.tolist()))
+
+    up_map = {}
+    for h in tb_up._hoppings:
+        k = hop_key(h, tb_up)
+        up_map[k] = complex(h[0])
+
+    dn_map = {}
+    for h in tb_dn._hoppings:
+        k = hop_key(h, tb_dn)
+        dn_map[k] = complex(h[0])
+
+    # --- intersection keys only ---
+    common_keys = set(up_map.keys()) & set(dn_map.keys())
+    if len(common_keys) == 0:
+        raise ValueError("No common hopping keys found between tb_up and tb_dn.")
+
+    # --- set hoppings for common keys only ---
+    for key in common_keys:
+        if dim_k == 0:
+            i, j = key
+            amp_up = up_map[key]
+            amp_dn = dn_map[key]
+            amp_spin = np.array([[amp_up, 0.0],
+                                  [0.0, amp_dn]], dtype=complex)
+            tb_spin.set_hop(amp_spin, i, j, mode="set")
+        else:
+            i, j, r_tup = key
+            r = np.array(r_tup, dtype=int)
+            amp_up = up_map[key]
+            amp_dn = dn_map[key]
+            amp_spin = np.array([[amp_up, 0.0],
+                                  [0.0, amp_dn]], dtype=complex)
+            tb_spin.set_hop(amp_spin, i, j, ind_R=r, mode="set")
+
+    return tb_spin
 
 def apply_local_spin_rotation_from_cellwf_samples(
     tb_spinful,
@@ -112,7 +200,7 @@ def apply_local_spin_rotation_from_cellwf_samples(
       t'   = u_i t u_j†
     """
     if tb_spinful._nspin != 2:
-        raise valueerror("tb_spinful must have nspin=2.")
+        raise ValueError("tb_spinful must have nspin=2.")
 
     base_norb = tb_spinful._norb
     dim_r = tb_spinful._dim_r
@@ -129,7 +217,7 @@ def apply_local_spin_rotation_from_cellwf_samples(
     # build u_list for each orbital in sc_tb
     num_sc = len(sc_vectors)
     if sc_tb._norb != base_norb * num_sc:
-        raise valueerror("unexpected supercell orbital count; check sc_red_lat.")
+        raise ValueError("unexpected supercell orbital count; check sc_red_lat.")
 
     u_list = [None] * sc_tb._norb
     for sc_i, cell_r in enumerate(sc_vectors):
@@ -138,7 +226,7 @@ def apply_local_spin_rotation_from_cellwf_samples(
             orb_i = sc_i * base_norb + wf_i
             key = (cell_key, int(wf_i))
             if key not in u_samples:
-                raise keyerror(
+                raise KeyError(
                     f"missing u_samples for key={key}. "
                     f"you need u for every (cell, wf_index) in the supercell."
                 )
@@ -192,10 +280,11 @@ def compute_rotated_bands_from_cellwf_samples(
       apply u_samples rotation (optionally on a supercell)
       diagonalize on k_vec
     """
-    tb_spin = build_spinful_from_collinear(tb_up, tb_dn, fermi_level=fermi_level)
+    # tb_spin = build_spinful_from_collinear(tb_up, tb_dn, fermi_level=fermi_level)
+    tb_spin = build_spinful_from_collinear_intersection(tb_up, tb_dn, fermi_level=fermi_level)
+    
     tb_rot = apply_local_spin_rotation_from_cellwf_samples(
         tb_spin, u_samples=u_samples, sc_red_lat=sc_red_lat, to_home=to_home
     )
     e = tb_rot.solve_all(k_vec)  # (n_bands, n_k)
     return e
-
