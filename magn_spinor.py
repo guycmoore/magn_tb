@@ -218,6 +218,57 @@ def magnetization_texture_skyrmion_00(x, y, z=0.0, r0=1.0):
     return n
 
 
+def magnetization_texture_1d(x, y=0.0, z=0.0, r0=1.0, f_fn=None, plane="xz", phi=0.0):
+    """
+    1D spatial magnetization texture rotating along propagation axis x.
+    
+    The local magnetization rotates by angle theta(x) = 2 * pi * f(x), where f(x)
+    is a user-supplied scalar function (or array/float).
+
+    Parameters:
+      x: x-coordinates (scalar or array)
+      y, z, r0: dummy position/scale arguments for compatibility with mag_fn(x, y, z, r0)
+      f_fn: callable or array/float. If callable, theta(x) = 2 * pi * f_fn(x).
+            If None, defaults to lambda x: x (linear 1D spiral).
+      plane: 'xz' (Néel cycloid along x: mx=sin(theta)*cos(phi), my=sin(theta)*sin(phi), mz=cos(theta)),
+             'xy' (Helical in-plane spiral: mx=cos(theta), my=sin(theta), mz=0),
+             'yz' (Bloch spiral along x: mx=0, my=sin(theta), mz=cos(theta)).
+      phi: optional polar angle offset in radians.
+
+    Returns:
+      n: unit vector, shape (..., 3)
+    """
+    x_arr = np.asarray(x, dtype=float)
+    if f_fn is None:
+        theta = 2.0 * np.pi * x_arr
+    elif callable(f_fn):
+        theta = 2.0 * np.pi * np.asarray(f_fn(x_arr), dtype=float)
+    else:
+        theta = 2.0 * np.pi * np.asarray(f_fn, dtype=float)
+
+    plane_str = str(plane).lower()
+    if plane_str == "xz":
+        mx = np.sin(theta) * np.cos(phi)
+        my = np.sin(theta) * np.sin(phi)
+        mz = np.cos(theta)
+    elif plane_str == "xy":
+        mx = np.cos(theta)
+        my = np.sin(theta)
+        mz = np.zeros_like(x_arr)
+    elif plane_str == "yz":
+        mx = np.zeros_like(x_arr)
+        my = np.sin(theta)
+        mz = np.cos(theta)
+    else:
+        raise ValueError(f"Unrecognized plane '{plane}'. Must be 'xz', 'xy', or 'yz'.")
+
+    n = np.stack([mx, my, mz], axis=-1)
+    norm = np.linalg.norm(n, axis=-1, keepdims=True)
+    norm = np.where(norm > 0, norm, 1.0)
+    n = n / norm
+    return n
+
+
 def magnetization_collinear(x, y, z=0.0, r0=1.0, vec=(1.0, 0.0, 0.0)):
     """
     Uniform collinear magnetization along a user-supplied 3D unit vector `vec`.
@@ -233,3 +284,4 @@ def magnetization_collinear(x, y, z=0.0, r0=1.0, vec=(1.0, 0.0, 0.0)):
     my = np.full_like(x_arr, v[1])
     mz = np.full_like(x_arr, v[2])
     return np.stack([mx, my, mz], axis=-1)
+
