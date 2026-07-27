@@ -216,3 +216,22 @@ def magnetization_texture_skyrmion_00(x, y, z=0.0, r0=1.0):
     # numerical normalization safeguard
     n = n / np.linalg.norm(n, axis=-1, keepdims=True)
     return n
+
+
+def magnetization_collinear(x, y, z=0.0, r0=1.0, vec=(1.0, 0.0, 0.0)):
+    """
+    Uniform collinear magnetization along a user-supplied 3D unit vector `vec`.
+    Default is +x ([1.0, 0.0, 0.0]).
+    """
+    x_arr = np.asarray(x, dtype=float)
+    v = np.asarray(vec, dtype=float)
+    v_norm = np.linalg.norm(v)
+    if v_norm > 0:
+        v = v / v_norm
+
+    mx = np.full_like(x_arr, v[0])
+    my = np.full_like(x_arr, v[1])
+    mz = np.full_like(x_arr, v[2])
+    return np.stack([mx, my, mz], axis=-1)
+
+
