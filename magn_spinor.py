@@ -4,9 +4,9 @@ import numpy as np
 # -----------------------------
 # Pauli matrices (spin-1/2)
 # -----------------------------
-_SIGMA_X = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
-_SIGMA_Y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=complex)
-_SIGMA_Z = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=complex)
+_sigma_x = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
+_sigma_y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=complex)
+_sigma_z = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=complex)
 
 
 def _su2_from_ref_to_n_single(sref, n, eps=1e-12):
@@ -52,7 +52,7 @@ def _su2_from_ref_to_n_single(sref, n, eps=1e-12):
         axis = a / a_norm
         theta = np.arctan2(a_norm, c)
 
-    sigma = axis[0] * _SIGMA_X + axis[1] * _SIGMA_Y + axis[2] * _SIGMA_Z
+    sigma = axis[0] * _sigma_x + axis[1] * _sigma_y + axis[2] * _sigma_z
     u = np.cos(theta / 2.0) * np.eye(2, dtype=complex) - 1.0j * np.sin(theta / 2.0) * sigma
     return u
 
@@ -138,9 +138,9 @@ def check_alignment(u_samples, n_samples):
     if u_samples.shape[0] != n_samples.shape[0]:
         raise ValueError("u_samples and n_samples must match in number of points")
 
-    sigma_z = _SIGMA_Z
-    sigma_x = _SIGMA_X
-    sigma_y = _SIGMA_Y
+    sigma_z = _sigma_z
+    sigma_x = _sigma_x
+    sigma_y = _sigma_y
 
     udag = np.conjugate(np.transpose(u_samples, (0, 2, 1)))
     rot = u_samples @ sigma_z @ udag  # (N,2,2)
@@ -233,5 +233,3 @@ def magnetization_collinear(x, y, z=0.0, r0=1.0, vec=(1.0, 0.0, 0.0)):
     my = np.full_like(x_arr, v[1])
     mz = np.full_like(x_arr, v[2])
     return np.stack([mx, my, mz], axis=-1)
-
-

@@ -3,28 +3,28 @@ import numpy as np
 # ---------------------------
 # Pauli matrices
 # ---------------------------
-SIGMA_X = np.array([[0, 1], [1, 0]], dtype=complex)
-SIGMA_Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
-SIGMA_Z = np.array([[1, 0], [0, -1]], dtype=complex)
+sigma_x = np.array([[0, 1], [1, 0]], dtype=complex)
+sigma_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+sigma_z = np.array([[1, 0], [0, -1]], dtype=complex)
 
 
 def _build_sc_translation_list(sc_red_lat):
     """
-    For diagonal integer supercell matrix diag(N1,N2,N3), return internal translations n:
+    For diagonal integer supercell matrix diag(n1,n2,n3), return internal translations n:
       n = (n1,n2,n3), ni=0..Ni-1
     in the same order as pythtb.make_supercell for simple diagonal case.
     """
-    S = np.asarray(sc_red_lat, dtype=int)
-    if S.shape != (3, 3):
+    s = np.asarray(sc_red_lat, dtype=int)
+    if s.shape != (3, 3):
         raise ValueError("sc_red_lat must be 3x3")
-    if not np.all(S == np.diag(np.diag(S))):
+    if not np.all(s == np.diag(np.diag(s))):
         raise NotImplementedError("Only diagonal supercells supported in this helper.")
 
-    N1, N2, N3 = np.diag(S)
+    n1_max, n2_max, n3_max = np.diag(s)
     out = []
-    for n1 in range(N1):
-        for n2 in range(N2):
-            for n3 in range(N3):
+    for n1 in range(n1_max):
+        for n2 in range(n2_max):
+            for n3 in range(n3_max):
                 out.append(np.array([n1, n2, n3], dtype=int))
     return np.array(out, dtype=int)  # (Nsc,3)
 
@@ -52,7 +52,7 @@ def eigensystem_at_k(tb_model_spinful, kpt):
 def projector_onto_ref_state_in_sc(ref_vec, k_p, k_s, r_int_list, base_norb, u_cell_list=None):
     """
     Embed primitive-cell ref eigenvector into supercell basis at fixed unfolding sector
-    via Bloch phase exp(i2pi (k_p-k_s)·R_int) and optional local spin rotation u_i per cell i.
+    via Bloch phase exp(i2pi (k_p-k_s)·r_int) and optional local spin rotation u_i per cell i.
 
     ref_vec: (2*base_norb,) primitive reference eigenvector
     u_cell_list: list of 2x2 complex matrices, length nq = len(r_int_list) (one per cell i in supercell)
@@ -64,8 +64,8 @@ def projector_onto_ref_state_in_sc(ref_vec, k_p, k_s, r_int_list, base_norb, u_c
     phi = np.zeros(nb_sc, dtype=complex)
 
     dq = np.asarray(k_p) - np.asarray(k_s)  # should match n/N
-    for iq, R in enumerate(r_int_list):
-        phase = np.exp(2j * np.pi * np.dot(dq, R))
+    for iq, r in enumerate(r_int_list):
+        phase = np.exp(2j * np.pi * np.dot(dq, r))
         i0 = iq * nb_prim
 
         if u_cell_list is not None and u_cell_list[iq] is not None:
@@ -96,8 +96,8 @@ def spin_expectation_from_coeffs(coeff):
 def project_sc_bands_on_reference(
     tb_up,
     tb_dn,
-    E_sc,
-    V_sc,            # shape expected (nband, nk, nbasis) OR (nk, nbasis, nband)
+    e_sc,
+    v_sc,            # shape expected (nband, nk, nbasis) OR (nk, nbasis, nband)
     k_s_list,
     sc_red_lat,
     u_samples=None,  # dict mapping (cell_key, wf_idx) -> 2x2 unitary matrix (or (cell_key,) -> 2x2)
@@ -113,35 +113,35 @@ def project_sc_bands_on_reference(
       - Compute local adiabatic weights and lab/local frame spin expectations
 
     Returns dict with:
-      weights[J,ik,nq,iref]       : local adiabatic projection weight
-      spin_lab[J,ik,nq,iref,3]    : lab-frame 3D spin expectation
-      spin_local[J,ik,nq,iref,3]  : local-frame 3D spin expectation
+      weights[j,ik,nq,iref]       : local adiabatic projection weight
+      spin_lab[j,ik,nq,iref,3]    : lab-frame 3D spin expectation
+      spin_local[j,ik,nq,iref,3]  : local-frame 3D spin expectation
       k_p[ik,nq,3]                : primitive momenta
-      E_ref[ik,nq,iref]           : primitive reference energies
+      e_ref[ik,nq,iref]           : primitive reference energies
     """
     tb_ref = build_reference_spinful(tb_up, tb_dn, fermi_level=fermi_level)
 
     k_s_arr = np.asarray(k_s_list, dtype=float)
     nk = k_s_arr.shape[0]
 
-    # normalize V_sc to (nband, nk, nbasis) with columns convention
-    V = np.asarray(V_sc)
-    if V.ndim != 3:
-        raise ValueError("V_sc must be 3D")
+    # normalize v_sc to (nband, nk, nbasis) with columns convention
+    v = np.asarray(v_sc)
+    if v.ndim != 3:
+        raise ValueError("v_sc must be 3D")
     
-    if V.shape[0] == nk:
+    if v.shape[0] == nk:
         # (nk, nbasis, nband) -> (nband, nk, nbasis)
-        V_bkn = np.transpose(V, (2, 0, 1))
-    elif V.shape[1] == nk:
+        v_bkn = np.transpose(v, (2, 0, 1))
+    elif v.shape[1] == nk:
         # Check if shape is (nband, nk, nbasis) vs (nbasis, nk, nband)
         # compute_rotated_bands_from_cellwf_samples_alt returns (nbasis, nk, nband)
-        # where V_sc[:, ik, j] is the j-th eigenvector.
+        # where v_sc[:, ik, j] is the j-th eigenvector.
         # So transpose (2, 1, 0) gives (nband, nk, nbasis)
-        V_bkn = np.transpose(V, (2, 1, 0))
+        v_bkn = np.transpose(v, (2, 1, 0))
     else:
-        raise ValueError("Unrecognized V_sc shape")
+        raise ValueError("Unrecognized v_sc shape")
 
-    nband, _, nbasis = V_bkn.shape
+    nband, _, nbasis = v_bkn.shape
     base_norb = tb_up._norb
 
     r_int = _build_sc_translation_list(sc_red_lat)
@@ -151,8 +151,8 @@ def project_sc_bands_on_reference(
     u_cell_list = None
     if u_samples is not None:
         u_cell_list = []
-        for iq, R in enumerate(r_int):
-            cell_key = tuple(int(x) for x in R)
+        for iq, r in enumerate(r_int):
+            cell_key = tuple(int(x) for x in r)
             # check for cell_key in u_samples
             if (cell_key, 0) in u_samples:
                 u_cell_list.append(u_samples[(cell_key, 0)])
@@ -167,18 +167,18 @@ def project_sc_bands_on_reference(
     weights = np.zeros((nband, nk, nq, nb_ref_keep), dtype=float)
     spin_lab = np.zeros((nband, nk, nq, nb_ref_keep, 3), dtype=float)
     spin_local = np.zeros((nband, nk, nq, nb_ref_keep, 3), dtype=float)
-    E_ref = np.zeros((nk, nq, nb_ref_keep), dtype=float)
+    e_ref = np.zeros((nk, nq, nb_ref_keep), dtype=float)
     k_p_all = np.zeros((nk, nq, 3), dtype=float)
 
     # unfolding vectors q = n/N
-    S = np.asarray(sc_red_lat, dtype=int)
-    N1, N2, N3 = np.diag(S)
-    q_list = np.array([[n1 / N1, n2 / N2, n3 / N3] for n1, n2, n3 in r_int], dtype=float)
+    s = np.asarray(sc_red_lat, dtype=int)
+    n1_max, n2_max, n3_max = np.diag(s)
+    q_list = np.array([[n1 / n1_max, n2 / n2_max, n3 / n3_max] for n1, n2, n3 in r_int], dtype=float)
     r_int_arr = np.array(r_int, dtype=float)
 
     for ik in range(nk):
         k_s = k_s_arr[ik]
-        psi_sc = V_bkn[:, ik, :]  # (nband, nbasis)
+        psi_sc = v_bkn[:, ik, :]  # (nband, nbasis)
         psi_sc_3d = psi_sc.reshape(nband, nq, base_norb, 2)
 
         # precompute local-frame supercell wavefunctions if u_cell_list provided
@@ -195,13 +195,13 @@ def project_sc_bands_on_reference(
             k_p = k_s + q
             k_p_all[ik, iq] = k_p
 
-            e_ref, v_ref = eigensystem_at_k(tb_ref, k_p)  # v_ref columns
-            E_ref[ik, iq, :] = e_ref[:nb_ref_keep]
+            e_ref_val, v_ref = eigensystem_at_k(tb_ref, k_p)  # v_ref columns
+            e_ref[ik, iq, :] = e_ref_val[:nb_ref_keep]
 
             # Fourier transform supercell wavefunctions into primitive sector q
             phase = np.exp(-2j * np.pi * (q @ r_int_arr.T)) / np.sqrt(nq) # (nq,)
-            c_q_lab = np.einsum('i, Jimb -> Jmb', phase, psi_sc_3d)       # (J, base_norb, 2)
-            c_q_loc = np.einsum('i, Jimb -> Jmb', phase, psi_loc_3d)      # (J, base_norb, 2)
+            c_q_lab = np.einsum('i, jimb -> jmb', phase, psi_sc_3d)       # (j, base_norb, 2)
+            c_q_loc = np.einsum('i, jimb -> jmb', phase, psi_loc_3d)      # (j, base_norb, 2)
 
             sx_lab = np.sum(2.0 * np.real(np.conj(c_q_lab[:, :, 0]) * c_q_lab[:, :, 1]), axis=1)
             sy_lab = np.sum(2.0 * np.imag(np.conj(c_q_lab[:, :, 1]) * c_q_lab[:, :, 0]), axis=1)
@@ -211,20 +211,20 @@ def project_sc_bands_on_reference(
             sy_loc = np.sum(2.0 * np.imag(np.conj(c_q_loc[:, :, 1]) * c_q_loc[:, :, 0]), axis=1)
             sz_loc = np.sum(np.abs(c_q_loc[:, :, 0])**2 - np.abs(c_q_loc[:, :, 1])**2, axis=1)
 
-            s_lab_vec = np.stack([sx_lab, sy_lab, sz_lab], axis=-1)   # (J, 3)
-            s_loc_vec = np.stack([sx_loc, sy_loc, sz_loc], axis=-1)   # (J, 3)
+            s_lab_vec = np.stack([sx_lab, sy_lab, sz_lab], axis=-1)   # (j, 3)
+            s_loc_vec = np.stack([sx_loc, sy_loc, sz_loc], axis=-1)   # (j, 3)
 
             for ir in range(nb_ref_keep):
                 ref_vec = v_ref[:, ir]  # primitive basis
                 phi = projector_onto_ref_state_in_sc(ref_vec, k_p, k_s, r_int, base_norb, u_cell_list=u_cell_list)
 
-                # overlaps for all SC bands J
-                ov = psi_sc @ np.conjugate(phi)  # (J,)
+                # overlaps for all SC bands j
+                ov = psi_sc @ np.conjugate(phi)  # (j,)
                 w = np.abs(ov) ** 2
                 weights[:, ik, iq, ir] = w.real
 
-                spin_lab[:, ik, iq, ir, :] = s_lab_vec
-                spin_local[:, ik, iq, ir, :] = s_loc_vec
+                spin_lab[:, ik, iq, ir, :] = w[:, None] * s_lab_vec
+                spin_local[:, ik, iq, ir, :] = w[:, None] * s_loc_vec
 
     return {
         "weights": weights,
@@ -232,7 +232,7 @@ def project_sc_bands_on_reference(
         "spin_local": spin_local,
         "spin_xyz": spin_lab,  # backwards compatibility alias
         "k_p": k_p_all,
-        "E_ref": E_ref,
+        "E_ref": e_ref,
     }
 
 
@@ -246,5 +246,3 @@ def rgb_from_spin(spin_vec, weight, eps=1e-12):
     unit = s / np.maximum(mag, eps)
     rgb = np.abs(unit)
     return np.clip(weight[..., None] * rgb, 0.0, 1.0)
-
-
