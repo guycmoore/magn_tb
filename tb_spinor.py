@@ -261,7 +261,12 @@ def _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amp_flat, nba
                     b = 2 * j0 + s2
                     t = hop_amp_flat[ih, a, b]
                     h_all[ik, a, b] += p * t
-                    h_all[ik, b, a] += pc * np.conjugate(t)
+
+                    # Correct Hermitian conjugation: (T_ij)^\dagger = (T_ij)^T*
+                    a_conj = 2 * j0 + s1
+                    b_conj = 2 * i0 + s2
+                    t_conj = np.conjugate(hop_amp_flat[ih, 2 * i0 + s2, 2 * j0 + s1])
+                    h_all[ik, a_conj, b_conj] += pc * t_conj
 
     return h_all
 
@@ -294,7 +299,7 @@ def _prepare_tb_arrays_for_numba(tb_rot):
         hop_amp_flat[ih, 2*i:2*i+2, 2*j:2*j+2] = amp2
 
         if dim_k > 0:
-            rv_full = np.asarray(h[3], dtype=np.float64)
+            rv_full = -tb_rot._orb[i, :] + tb_rot._orb[j, :] + np.asarray(h[3], dtype=np.float64)
             rv_k = rv_full[per] if len(per) > 0 else np.zeros((dim_k,), dtype=np.float64)
             r_arr[ih, :] = rv_k
 
