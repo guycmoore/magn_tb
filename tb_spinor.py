@@ -366,6 +366,124 @@ def compute_rotated_bands_parallel(
 compute_rotated_bands_from_cellwf_samples_alt = compute_rotated_bands_parallel
 
 
+def compute_rotated_bands_mpi(
+    tb_up,
+    tb_dn,
+    k_vec,
+    u_samples,
+    sc_red_lat=None,
+    to_home=True,
+    fermi_level=0.0,
+    eig_vectors=True,
+    comm=None,
+    root=0,
+    bcast_results=False,
+):
+    """
+    MPI-distributed solver that partitions k-points across MPI processes.
+    Each MPI rank independently assembles and diagonalizes its assigned subset of k-points
+    using the exact same mathematical formulation as the serial reference solver.
+    Eigenvalues (and eigenvectors) are gathered onto rank 0 (root).
+
+    Parameters:
+      tb_up, tb_dn: Spinless PythTB models for spin-up and spin-down.
+      k_vec: Array of k-points, shape (nk, dim_k) or (nk,).
+      u_samples: Dict mapping (cell_key, wf_idx) -> 2x2 unitary SU(2) matrix.
+      sc_red_lat: Supercell matrix (e.g. 3x3 integer matrix).
+      to_home: If True, translate supercell coordinates to home unit cell.
+      fermi_level: Fermi level offset (eV).
+      eig_vectors: If True, return (evals, evecs); else evals only.
+      comm: mpi4py MPI communicator (defaults to MPI.COMM_WORLD if available).
+      root: Rank ID that collects the full results (default 0).
+      bcast_results: If True, broadcast gathered results to all ranks.
+
+    Returns:
+      On root rank:
+        evals: (nband, nk)
+        evecs: (nband, nk, nband) [if eig_vectors=True]
+      On non-root ranks (when bcast_results=False):
+        None, None (or None if eig_vectors=False)
+    """
+    if comm is None:
+        try:
+            from mpi4py import MPI
+            comm = MPI.COMM_WORLD
+        except ImportError:
+            comm = None
+
+    rank = comm.Get_rank() if comm is not None else 0
+    size = comm.Get_size() if comm is not None else 1
+
+    tb_spin = build_spinful_from_collinear_intersection(
+        tb_up, tb_dn, fermi_level=fermi_level
+    )
+    tb_rot = apply_local_spin_rotation_from_cellwf_samples(
+        tb_spin, u_samples=u_samples, sc_red_lat=sc_red_lat, to_home=to_home
+    )
+
+    k_arr = np.asarray(k_vec, dtype=float)
+    if k_arr.ndim == 1:
+        k_arr = k_arr.reshape(-1, 1)
+    nk = k_arr.shape[0]
+
+    onsite_flat, hop_i, hop_j, hop_amp_flat, r_arr, nband = _prepare_tb_arrays_for_numba(tb_rot)
+
+    # Distribute k-point indices across ranks
+    k_indices_all = np.array_split(np.arange(nk), size)
+    local_indices = k_indices_all[rank]
+    n_local = len(local_indices)
+
+    if n_local > 0:
+        k_local = k_arr[local_indices]
+        phases_local = _phases_from_k_and_r(k_local, r_arr)
+        h_all_local = _assemble_h_all_k_numba(
+            phases_local, onsite_flat, hop_i, hop_j, hop_amp_flat, nband
+        )
+
+        evals_local = np.empty((nband, n_local), dtype=np.float64)
+        if eig_vectors:
+            evecs_local = np.empty((nband, n_local, nband), dtype=np.complex128)
+            for ik in range(n_local):
+                w, v = np.linalg.eigh(h_all_local[ik])
+                evals_local[:, ik] = w.real
+                evecs_local[:, ik, :] = v
+        else:
+            evecs_local = None
+            for ik in range(n_local):
+                w = np.linalg.eigvalsh(h_all_local[ik])
+                evals_local[:, ik] = w.real
+    else:
+        evals_local = np.empty((nband, 0), dtype=np.float64)
+        evecs_local = np.empty((nband, 0, nband), dtype=np.complex128) if eig_vectors else None
+
+    # Gather to root rank
+    if comm is not None and size > 1:
+        gathered_evals = comm.gather(evals_local, root=root)
+        gathered_evecs = comm.gather(evecs_local, root=root) if eig_vectors else None
+    else:
+        gathered_evals = [evals_local]
+        gathered_evecs = [evecs_local] if eig_vectors else None
+
+    if rank == root:
+        evals = np.concatenate(gathered_evals, axis=1)
+        if eig_vectors:
+            evecs = np.concatenate(gathered_evecs, axis=1)
+        else:
+            evecs = None
+    else:
+        evals = None
+        evecs = None
+
+    if comm is not None and size > 1 and bcast_results:
+        evals = comm.bcast(evals, root=root)
+        if eig_vectors:
+            evecs = comm.bcast(evecs, root=root)
+
+    if eig_vectors:
+        return evals, evecs
+    return evals
+
+
 # ---------------------------------------------------------------------------
 # 3. Density of States (DOS) & Projected DOS (PDOS) Helper
 # ---------------------------------------------------------------------------
