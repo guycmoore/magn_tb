@@ -88,15 +88,95 @@ def build_spinful_from_collinear_intersection(tb_up, tb_dn, fermi_level=0.0):
     return tb_spin
 
 
+def make_supercell_fast(tb, sc_red_lat, return_sc_vectors=True, to_home=True):
+    """
+    Optimized supercell constructor mathematically identical to pythtb.tb_model.make_supercell,
+    avoiding the O(N^2) linear scan in set_hop when appending hoppings.
+    """
+    dim_r = tb._dim_r
+    dim_k = tb._dim_k
+    use_sc_red_lat = np.array(sc_red_lat, dtype=int)
+
+    def to_red_sc(red_vec_orig):
+        return np.linalg.solve(use_sc_red_lat.T.astype(float), np.asarray(red_vec_orig, dtype=float))
+
+    max_R = int(np.max(np.abs(use_sc_red_lat)) * dim_r)
+    sc_cands = []
+    if dim_r == 1:
+        for i in range(-max_R, max_R + 1):
+            sc_cands.append(np.array([i]))
+    elif dim_r == 2:
+        for i in range(-max_R, max_R + 1):
+            for j in range(-max_R, max_R + 1):
+                sc_cands.append(np.array([i, j]))
+    elif dim_r == 3:
+        for i in range(-max_R, max_R + 1):
+            for j in range(-max_R, max_R + 1):
+                for k in range(-max_R, max_R + 1):
+                    sc_cands.append(np.array([i, j, k]))
+
+    sc_vec = []
+    eps_shift = np.sqrt(2.0) * 1.0e-8
+    for vec in sc_cands:
+        tmp_red = to_red_sc(vec)
+        if np.all(tmp_red > -eps_shift) and np.all(tmp_red <= 1.0 - eps_shift):
+            sc_vec.append(vec)
+
+    num_sc = len(sc_vec)
+    sc_cart_lat = np.dot(use_sc_red_lat, tb._lat)
+
+    sc_orb = []
+    for cur_sc_vec in sc_vec:
+        for orb in tb._orb:
+            sc_orb.append(to_red_sc(orb + cur_sc_vec))
+
+    sc_tb = tb_model(dim_k, dim_r, sc_cart_lat, sc_orb, per=tb._per, nspin=tb._nspin)
+    sc_tb._assume_position_operator_diagonal = tb._assume_position_operator_diagonal
+
+    onsite_list = []
+    for i in range(num_sc):
+        for j in range(tb._norb):
+            onsite_list.append(tb._site_energies[j])
+    sc_tb.set_onsite(onsite_list)
+
+    sc_vec_map = {tuple(v.tolist()): idx for idx, v in enumerate(sc_vec)}
+    sc_hoppings = []
+    norb_prim = tb._norb
+
+    for c, cur_sc_vec in enumerate(sc_vec):
+        for h in tb._hoppings:
+            amp = h[0]
+            ind_i = h[1]
+            ind_j = h[2]
+            ind_R = np.asarray(h[3], dtype=float)
+
+            shifted_R = ind_R + cur_sc_vec
+            sc_part = np.floor(to_red_sc(shifted_R)).astype(int)
+            orig_part = tuple(np.round(shifted_R - np.dot(sc_part, use_sc_red_lat)).astype(int).tolist())
+            pair_ind = sc_vec_map[orig_part]
+
+            hi = ind_i + c * norb_prim
+            hj = ind_j + pair_ind * norb_prim
+            sc_hoppings.append([amp, hi, hj, sc_part])
+
+    sc_tb._hoppings = sc_hoppings
+    if to_home:
+        sc_tb._shift_to_home()
+
+    if return_sc_vectors:
+        return sc_tb, sc_vec
+    return sc_tb
+
+
 def apply_local_spin_rotation_from_cellwf_samples(
     tb_spinful,
     u_samples,
     sc_red_lat=None,
     to_home=True,
-    su2_tol=1e-8,
+    su2_tol=1e-6,
 ):
     """
-    Assigns u_i per orbital i using:
+    Apply local SU(2) spinor rotation defined per unit cell and Wannier function:
       u_samples[(cell_r_int_tuple, wf_index)] -> 2x2 unitary spinor matrix
     Rotates onsite and hopping blocks:
       eps' = u eps u†
@@ -110,8 +190,8 @@ def apply_local_spin_rotation_from_cellwf_samples(
     dim_k = tb_spinful._dim_k
 
     if sc_red_lat is not None:
-        sc_tb, sc_vectors = tb_spinful.make_supercell(
-            sc_red_lat, return_sc_vectors=True, to_home=to_home
+        sc_tb, sc_vectors = make_supercell_fast(
+            tb_spinful, sc_red_lat, return_sc_vectors=True, to_home=to_home
         )
     else:
         sc_tb = tb_spinful
@@ -149,6 +229,7 @@ def apply_local_spin_rotation_from_cellwf_samples(
     tb_rot.set_onsite(onsite_rot)
 
     # hopping rotation: t' = u_i t u_j†
+    tb_rot_hoppings = []
     for h in sc_tb._hoppings:
         amp = np.array(h[0], dtype=complex)
         i = int(h[1])
@@ -158,10 +239,11 @@ def apply_local_spin_rotation_from_cellwf_samples(
         amp_p = ui @ amp @ uj.conj().T
 
         if dim_k == 0:
-            tb_rot.set_hop(amp_p, i, j, mode="set")
+            tb_rot_hoppings.append([amp_p, i, j])
         else:
             ind_r = np.array(h[3], dtype=int)
-            tb_rot.set_hop(amp_p, i, j, ind_R=ind_r, mode="set")
+            tb_rot_hoppings.append([amp_p, i, j, ind_r])
+    tb_rot._hoppings = tb_rot_hoppings
 
     return tb_rot
 
@@ -239,7 +321,7 @@ def _phases_from_k_and_r(k_arr, r_arr):
 
 
 @njit(parallel=True, cache=True, fastmath=False)
-def _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amp_flat, nband):
+def _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amps, nband):
     nk = phases.shape[0]
     nh = phases.shape[1]
     h_all = np.zeros((nk, nband, nband), dtype=np.complex128)
@@ -257,16 +339,12 @@ def _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amp_flat, nba
 
             for s1 in range(2):
                 for s2 in range(2):
-                    a = 2 * i0 + s1
-                    b = 2 * j0 + s2
-                    t = hop_amp_flat[ih, a, b]
-                    h_all[ik, a, b] += p * t
+                    t = hop_amps[ih, s1, s2]
+                    h_all[ik, 2 * i0 + s1, 2 * j0 + s2] += p * t
 
                     # Correct Hermitian conjugation: (T_ij)^\dagger = (T_ij)^T*
-                    a_conj = 2 * j0 + s1
-                    b_conj = 2 * i0 + s2
-                    t_conj = np.conjugate(hop_amp_flat[ih, 2 * i0 + s2, 2 * j0 + s1])
-                    h_all[ik, a_conj, b_conj] += pc * t_conj
+                    t_conj = np.conjugate(hop_amps[ih, s2, s1])
+                    h_all[ik, 2 * j0 + s1, 2 * i0 + s2] += pc * t_conj
 
     return h_all
 
@@ -286,24 +364,23 @@ def _prepare_tb_arrays_for_numba(tb_rot):
     nhop = len(tb_rot._hoppings)
     hop_i = np.zeros(nhop, dtype=np.int64)
     hop_j = np.zeros(nhop, dtype=np.int64)
-    hop_amp_flat = np.zeros((nhop, nband, nband), dtype=np.complex128)
+    hop_amps = np.zeros((nhop, 2, 2), dtype=np.complex128)
     r_arr = np.zeros((nhop, dim_k), dtype=np.float64)
 
     for ih, h in enumerate(tb_rot._hoppings):
-        amp2 = np.asarray(h[0], dtype=np.complex128)
+        hop_amps[ih] = np.asarray(h[0], dtype=np.complex128)
         i = int(h[1])
         j = int(h[2])
 
         hop_i[ih] = i
         hop_j[ih] = j
-        hop_amp_flat[ih, 2*i:2*i+2, 2*j:2*j+2] = amp2
 
         if dim_k > 0:
             rv_full = -tb_rot._orb[i, :] + tb_rot._orb[j, :] + np.asarray(h[3], dtype=np.float64)
             rv_k = rv_full[per] if len(per) > 0 else np.zeros((dim_k,), dtype=np.float64)
             r_arr[ih, :] = rv_k
 
-    return onsite_flat, hop_i, hop_j, hop_amp_flat, r_arr, nband
+    return onsite_flat, hop_i, hop_j, hop_amps, r_arr, nband
 
 
 def _solve_single_h(h, eig_vectors=True):
@@ -341,9 +418,9 @@ def compute_rotated_bands_parallel(
     if k_arr.ndim == 1:
         k_arr = k_arr.reshape(-1, 1)
 
-    onsite_flat, hop_i, hop_j, hop_amp_flat, r_arr, nband = _prepare_tb_arrays_for_numba(tb_rot)
+    onsite_flat, hop_i, hop_j, hop_amps, r_arr, nband = _prepare_tb_arrays_for_numba(tb_rot)
     phases = _phases_from_k_and_r(k_arr, r_arr)
-    h_all = _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amp_flat, nband)
+    h_all = _assemble_h_all_k_numba(phases, onsite_flat, hop_i, hop_j, hop_amps, nband)
 
     nk = h_all.shape[0]
 
@@ -426,7 +503,7 @@ def compute_rotated_bands_mpi(
         k_arr = k_arr.reshape(-1, 1)
     nk = k_arr.shape[0]
 
-    onsite_flat, hop_i, hop_j, hop_amp_flat, r_arr, nband = _prepare_tb_arrays_for_numba(tb_rot)
+    onsite_flat, hop_i, hop_j, hop_amps, r_arr, nband = _prepare_tb_arrays_for_numba(tb_rot)
 
     # Distribute k-point indices across ranks
     k_indices_all = np.array_split(np.arange(nk), size)
@@ -437,7 +514,7 @@ def compute_rotated_bands_mpi(
         k_local = k_arr[local_indices]
         phases_local = _phases_from_k_and_r(k_local, r_arr)
         h_all_local = _assemble_h_all_k_numba(
-            phases_local, onsite_flat, hop_i, hop_j, hop_amp_flat, nband
+            phases_local, onsite_flat, hop_i, hop_j, hop_amps, nband
         )
 
         evals_local = np.empty((nband, n_local), dtype=np.float64)
